@@ -1,91 +1,102 @@
 from flask import Flask, request, jsonify
-import openai
-import base64
-import os
 from flask_cors import CORS
+import os
+import base64
+import openai
+import stripe
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS so your frontend can call this backend
+CORS(app)
 
-# Use your real OpenAI API key in a secure environment variable
 openai.api_key = os.getenv("OPENAI_API_KEY")
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+# Track sessions that have completed payment; a simple in-memory set
+paid_sessions = set()
+
+@app.route("/create-checkout-session", methods=["POST"])
+def create_checkout_session():
+    """Create a Stripe Checkout Session for one hair scan costing $1."""
+    try:
+        data = request.get_json() or {}
+        success_url = data.get("success_url", "")
+        cancel_url = data.get("cancel_url", "")
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "unit_amount": 100,
+                    "product_data": {"name": "CurlWise Hair Scan"},
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url=(success_url + ("?session_id={CHECKOUT_SESSION_ID}" if success_url else "")) or "",
+            cancel_url=cancel_url or "",
+        )
+        return jsonify({"id": session.id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/stripe-webhook", methods=["POST"])
+def stripe_webhook():
+    """Listen to Stripe webhooks and record successful payments."""
+    payload = request.data
+    sig_header = request.headers.get("stripe-signature")
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+    except Exception as e:
+        return jsonify({"error": "Webhook error: " + str(e)}), 400
+    if event.get("type") == "checkout.session.completed":
+        session = event["data"]["object"]
+        paid_sessions.add(session["id"])
+    return "", 200
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    if 'image' not in request.files:
+    """Analyze a user's curl image after verifying payment and return routine recommendations."""
+    session_id = request.form.get("session_id") or (request.get_json() or {}).get("session_id")
+    if not session_id or session_id not in paid_sessions:
+        return jsonify({"error": "Payment required"}), 402
+    # remove session to prevent reuse
+    paid_sessions.discard(session_id)
+    if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
-
-    image = request.files['image']
-    base64_image = base64.b64encode(image.read()).decode('utf-8')
-
-    # 🔍 STEP 1: Vision API analyzes curl traits
-    vision_response = openai.ChatCompletion.create(
-        model="gpt-4-vision-preview",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Please analyze this photo of curly hair. Identify:\n"
-                            "- Curl type (1A to 4C)\n"
-                            "- Porosity (low, med, high)\n"
-                            "- Frizz level\n"
-                            "- Volume/density\n"
-                            "- Overall hair health"
-                        )
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        }
-                    }
-                ]
-            }
-        ],
-        max_tokens=500
-    )
-
-    analysis = vision_response['choices'][0]['message']['content']
-
-    # 🧴 STEP 2: GPT-4 creates care routine + DIY recipes
-    prompt = f"""
-    Based on this hair analysis: {analysis}, generate a personalized curly hair care routine for a 15-year-old girl. Include:
-
-    1. A care routine:
-       - Wash frequency
-       - Product types (moisturizers, leave-ins, stylers)
-       - Styling methods
-       - Sleep protection
-
-    2. A list of 2–3 DIY hair product recipes made with common home ingredients.
-       For each DIY product, include:
-       - Name
-       - Purpose (e.g. deep conditioning, curl definition)
-       - Ingredients
-       - Instructions
-       - How often to use it
-       - One-sentence scientific justification (e.g. “Aloe vera contains mucilage, which enhances moisture retention.”)
-    """
-
-    routine_response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            { "role": "user", "content": prompt }
-        ],
-        max_tokens=1000
-    )
-
-    routine = routine_response['choices'][0]['message']['content']
-
-    return jsonify({
-        "curl_analysis": analysis,
-        "result": routine
-    })
-
-# Optional: health check
-@app.route("/")
-def home():
-    return "Curlwise backend is live!"
+    try:
+        image = request.files["image"]
+        base64_image = base64.b64encode(image.read()).decode("utf-8")
+        vision_response = openai.ChatCompletion.create(
+            model="gpt-4-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": (
+                            "Please analyze this photo of curl / hair texture and describe the hair type (e.g. 2a, 2b, 3a, 3b, etc.) "
+                            "along with curl pattern characteristics and common concerns like dryness or frizz."
+                        )},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                    ],
+                }
+            ],
+            max_tokens=400,
+        )
+        curl_analysis = vision_response.choices[0].message.content.strip()
+        routine_prompt = (
+            "You are a curl care assistant. Based on the following analysis of a user's curls, "
+            "recommend a personalized hair care routine, including washing, conditioning, styling products, and "
+            "DIY recipes with proportions. Be concise yet thorough.\nAnalysis:\n" + curl_analysis
+        )
+        routine_response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": routine_prompt}],
+            temperature=0.7,
+            max_tokens=500,
+            n=1,
+        )
+        routine = routine_response.choices[0].message.content.strip()
+        return jsonify({"curl_analysis": curl_analysis, "result": routine})
+    except Exception as e:
+        return jsonify({"error": "Internal server error: " + str(e)}), 500
