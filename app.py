@@ -100,3 +100,8 @@ def analyze():
         return jsonify({"curl_analysis": curl_analysis, "result": routine})
     except Exception as e:
         return jsonify({"error": "Internal server error: " + str(e)}), 500
+
+
+if __name__ == "__main__":
+    # Run the Flask development server
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
