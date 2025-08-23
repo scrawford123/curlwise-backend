@@ -61,7 +61,10 @@ def analyze():
   #  if not session_id or session_id not in paid_sessions:
    #     return jsonify({"error": "Payment required"}), 402
     # remove session to prevent reuse
-   if session_id:  paid_sessions.discard(session_id)
+    if session_id:
+        paid_sessions.discard(session_id)
+
+#   if session_id:  paid_sessions.discard(session_id)
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
     try:
