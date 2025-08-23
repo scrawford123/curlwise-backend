@@ -58,10 +58,10 @@ def stripe_webhook():
 def analyze():
     """Analyze a user's curl image after verifying payment and return routine recommendations."""
     session_id = request.form.get("session_id") or (request.get_json() or {}).get("session_id")
-    if not session_id or session_id not in paid_sessions:
-        return jsonify({"error": "Payment required"}), 402
+  #  if not session_id or session_id not in paid_sessions:
+   #     return jsonify({"error": "Payment required"}), 402
     # remove session to prevent reuse
-    paid_sessions.discard(session_id)
+   if session_id:  paid_sessions.discard(session_id)
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
     try:
